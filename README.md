@@ -43,6 +43,7 @@ Standalone package entrypoint:
 - `kerf`: cutting tool thickness
 - `minLeftoverSize` (optional): minimum leftover size to include in output
 - `maxRecursionDepth` (optional, 2D): max recursive fill depth per target pass, defaults to `64`
+- In `1d` mode, width offset is always `0`; trim is applied only along length (`height`/Y).
 - Input must already contain final dimensions for packing.
 
 ### `stock`

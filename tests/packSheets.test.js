@@ -117,6 +117,9 @@ test('packSheets: 1D defaults use stock width', () => {
     const placed = getPlacedParts(result.results[0]);
     assert.equal(placed.length, 1);
     assert.equal(placed[0].width, 80);
+    for (const item of result.results[0].items) {
+        assert.equal(item.x, 0);
+    }
 });
 
 test('packSheets: minLeftoverSize filters tiny 1D leftovers', () => {

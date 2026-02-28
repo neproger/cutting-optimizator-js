@@ -209,6 +209,8 @@ const packLinearProfiles = ({
     const results = [];
     const oversizedParts = [];
 
+    // 1D mode tracks only length (Y axis). Width offset is always zero.
+    const widthOffset = 0;
     const outputProfileWidth = stock.width;
     const profileInnerWidth = outputProfileWidth;
     const minRemainder = Math.max(0, minLeftoverSize);
@@ -240,7 +242,7 @@ const packLinearProfiles = ({
             sheetItems.push({
                 ...part,
                 type: 'parts',
-                x: 0,
+                x: widthOffset,
                 y: yCursor,
                 width: profileInnerWidth > EPSILON ? profileInnerWidth : outputProfileWidth,
                 height: partLength,
@@ -255,7 +257,7 @@ const packLinearProfiles = ({
             sheetItems.push({
                 ...stock,
                 type: 'materials',
-                x: 0,
+                x: widthOffset,
                 y: yCursor,
                 width: profileInnerWidth > EPSILON ? profileInnerWidth : outputProfileWidth,
                 height: leftoverHeight,
