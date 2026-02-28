@@ -14,13 +14,11 @@ Main goal:
 
 - receive normalized input objects
 - produce cut maps (placed parts + leftovers)
-- fail fast on invalid input (logs error to console and returns `error` field)
+- fail fast on invalid input (returns `error` field without automatic console logging)
 
 The module uses only canonical fields.
 
 ## Public API
-
-From `src/modules/packer/index.js`:
 
 - `packSheets(stock, parts, settings)`
 
@@ -35,12 +33,16 @@ Standalone package entrypoint:
 ```json
 {
   "sheetTrim": 10,
-  "kerf": 4
+  "kerf": 4,
+  "minLeftoverSize": 1,
+  "maxRecursionDepth": 64
 }
 ```
 
 - `sheetTrim`: sheet border trim from each side
 - `kerf`: cutting tool thickness
+- `minLeftoverSize` (optional): minimum leftover size to include in output
+- `maxRecursionDepth` (optional, 2D): max recursive fill depth per target pass, defaults to `64`
 - Input must already contain final dimensions for packing.
 
 ### `stock`
@@ -94,13 +96,31 @@ Optional fields:
       ]
     }
   ],
-  "tooBigParts": []
+  "tooBigParts": [],
+  "unplacedParts": [],
+  "stopReason": null,
+  "stats": {
+    "inputParts": 24,
+    "placedParts": 24,
+    "usedAreaTotal": 4567890,
+    "efficiency": 91.3,
+    "sheetIterations": 1,
+    "maxSheetIterations": 1000,
+    "directionalPasses": 8,
+    "maxRecursionDepthReached": false,
+    "maxRecursionDepthObserved": 3,
+    "directionalGuardLimitReached": false
+  }
 }
 ```
 
 - `results[*].items` contains both:
   - placed parts (`type: "parts"`)
   - leftovers (`type: "materials"`)
+- `tooBigParts`: parts that cannot fit the effective sheet bounds
+- `unplacedParts`: parts that fit bounds but were not placed by current heuristic run
+- `stopReason`: `null` or machine-readable reason (for example `validation_error`, `no_progress`, `directional_guard_limit_reached`, `max_sheet_iterations_reached`)
+- `stats`: diagnostic execution metrics for analysis/debug
 
 ### `packSheets(...)` validation error return
 
@@ -108,6 +128,8 @@ Optional fields:
 {
   "results": [],
   "tooBigParts": [],
+  "unplacedParts": [],
+  "stopReason": "validation_error",
   "error": "[packer] ...validation message..."
 }
 ```

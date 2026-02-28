@@ -5,18 +5,50 @@ import { CUT_AXIS, runTargetPass } from './runTargetPass.js';
 const isFiniteNumber = (value) => typeof value === 'number' && Number.isFinite(value);
 const isNonNegativeNumber = (value) => isFiniteNumber(value) && value >= 0;
 const isPositiveNumber = (value) => isFiniteNumber(value) && value > 0;
+const EPSILON = 1e-6;
+const DP_SCALE = 10;
+const MAX_DIMENSION = 1e8;
+const DIRECTIONAL_GUARD_MIN = 200;
+const toDpUnits = (value) => Math.max(0, Math.floor((value + EPSILON) * DP_SCALE));
 
-const buildInputError = (message, payload = null) => {
+const createEmptyResult = (overrides = {}) => ({
+    results: [],
+    tooBigParts: [],
+    unplacedParts: [],
+    stopReason: null,
+    stats: {
+        inputParts: 0,
+        placedParts: 0,
+        usedAreaTotal: 0,
+        efficiency: 0,
+        sheetIterations: 0,
+        maxSheetIterations: 0,
+        directionalPasses: 0,
+        maxRecursionDepthReached: false,
+        maxRecursionDepthObserved: 0,
+        directionalGuardLimitReached: false,
+    },
+    ...overrides,
+});
+
+const buildInputError = (message) => {
     const fullMessage = `[packer] ${message}`;
-    if (payload) console.error(fullMessage, payload);
-    else console.error(fullMessage);
-    return { results: [], tooBigParts: [], error: fullMessage };
+    return createEmptyResult({
+        error: fullMessage,
+        stopReason: 'validation_error',
+    });
 };
 
 const validateSettings = (settings) => {
     if (!settings || typeof settings !== 'object') return { ok: false, error: '`settings` must be an object.' };
     if (!isNonNegativeNumber(settings.sheetTrim)) return { ok: false, error: '`settings.sheetTrim` must be a non-negative number.' };
     if (!isNonNegativeNumber(settings.kerf)) return { ok: false, error: '`settings.kerf` must be a non-negative number.' };
+    if (settings.minLeftoverSize != null && !isNonNegativeNumber(settings.minLeftoverSize)) {
+        return { ok: false, error: '`settings.minLeftoverSize` must be a non-negative number.' };
+    }
+    if (settings.maxRecursionDepth != null && (!Number.isInteger(settings.maxRecursionDepth) || settings.maxRecursionDepth < 0)) {
+        return { ok: false, error: '`settings.maxRecursionDepth` must be an integer >= 0.' };
+    }
     return { ok: true };
 };
 
@@ -25,6 +57,8 @@ const validateStock = (stock) => {
     if (stock.mode !== '2d' && stock.mode !== '1d') return { ok: false, error: '`stock.mode` must be `2d` or `1d`.' };
     if (!isPositiveNumber(stock.width)) return { ok: false, error: '`stock.width` must be a positive number.' };
     if (!isPositiveNumber(stock.height)) return { ok: false, error: '`stock.height` must be a positive number.' };
+    if (stock.width > MAX_DIMENSION) return { ok: false, error: '`stock.width` is too large.' };
+    if (stock.height > MAX_DIMENSION) return { ok: false, error: '`stock.height` is too large.' };
     if (typeof stock.allowRotation !== 'boolean') return { ok: false, error: '`stock.allowRotation` must be boolean.' };
     return { ok: true };
 };
@@ -39,6 +73,8 @@ const normalizeAndExpandParts = (parts) => {
         if (part.id == null) return { ok: false, error: `parts[${i}].id is required.` };
         if (!isPositiveNumber(part.width)) return { ok: false, error: `parts[${i}].width must be a positive number.` };
         if (!isPositiveNumber(part.height)) return { ok: false, error: `parts[${i}].height must be a positive number.` };
+        if (part.width > MAX_DIMENSION) return { ok: false, error: `parts[${i}].width is too large.` };
+        if (part.height > MAX_DIMENSION) return { ok: false, error: `parts[${i}].height is too large.` };
 
         const count = part.count == null ? 1 : part.count;
         if (!Number.isInteger(count) || count < 1) {
@@ -61,7 +97,7 @@ const getEffectiveWidth = (part) => part.width;
 const getEffectiveHeight = (part) => part.height;
 const getEffectiveArea = (part) => getEffectiveWidth(part) * getEffectiveHeight(part);
 const canFitPart = (partWidth, partHeight, maxWidth, maxHeight) =>
-    partWidth <= maxWidth && partHeight <= maxHeight;
+    partWidth <= maxWidth + EPSILON && partHeight <= maxHeight + EPSILON;
 
 const getUsedAreaFromPlacements = (placements) => {
     if (!Array.isArray(placements) || placements.length === 0) return 0;
@@ -107,11 +143,15 @@ const createCutMap = ({ stock, items, partsCount, sheetArea, outputWidth, output
     };
 };
 
+/**
+ * 0/1 knapsack for 1D profile mode.
+ * Maximizes consumed length (with kerf) within available profile length.
+ */
 const pickBestPartsFor1DLength = (parts, targetLength, cuttingTool) => {
-    const capacity = Math.max(0, Math.floor(targetLength));
+    const capacity = toDpUnits(targetLength);
     if (capacity <= 0 || !Array.isArray(parts) || parts.length === 0) return [];
 
-    const kerf = Math.max(0, Math.floor(cuttingTool));
+    const kerf = toDpUnits(cuttingTool);
     const dpLength = new Int32Array(capacity + 1);
     const prevCap = new Int32Array(capacity + 1);
     const pickedIdx = new Int32Array(capacity + 1);
@@ -124,7 +164,7 @@ const pickBestPartsFor1DLength = (parts, targetLength, cuttingTool) => {
     dpLength[0] = 0;
 
     for (let idx = 0; idx < parts.length; idx += 1) {
-        const length = Math.max(0, Math.floor(parts[idx].height));
+        const length = toDpUnits(parts[idx].height);
         const size = length + kerf;
         if (size <= 0 || size > capacity) continue;
 
@@ -159,16 +199,22 @@ const pickBestPartsFor1DLength = (parts, targetLength, cuttingTool) => {
     return resultIndexes.map((idx) => parts[idx]);
 };
 
-const packLinearProfiles = ({ stock, parts, sheetTrim, kerf }) => {
+const packLinearProfiles = ({
+    stock,
+    parts,
+    sheetTrim,
+    kerf,
+    minLeftoverSize = 0,
+}) => {
     const results = [];
     const oversizedParts = [];
 
-    const profileWidth = 200;
-    const profileSideOffset = 10;
-    const profileInnerWidth = Math.max(0, profileWidth - profileSideOffset * 2);
+    const outputProfileWidth = stock.width;
+    const profileInnerWidth = outputProfileWidth;
+    const minRemainder = Math.max(0, minLeftoverSize);
 
     const maxLength = stock.height - sheetTrim * 2;
-    if (maxLength <= 0) return { results: [], oversizedParts: parts };
+    if (maxLength <= EPSILON) return { results: [], oversizedParts: parts };
 
     let remainingParts = [];
     for (let i = 0; i < parts.length; i += 1) {
@@ -194,9 +240,9 @@ const packLinearProfiles = ({ stock, parts, sheetTrim, kerf }) => {
             sheetItems.push({
                 ...part,
                 type: 'parts',
-                x: profileSideOffset,
+                x: 0,
                 y: yCursor,
-                width: profileInnerWidth > 0 ? profileInnerWidth : stock.width,
+                width: profileInnerWidth > EPSILON ? profileInnerWidth : outputProfileWidth,
                 height: partLength,
             });
             usedLength += partLength;
@@ -205,13 +251,13 @@ const packLinearProfiles = ({ stock, parts, sheetTrim, kerf }) => {
 
         const endY = stock.height - sheetTrim;
         const leftoverHeight = endY - yCursor;
-        if (leftoverHeight > 0) {
+        if (leftoverHeight > minRemainder + EPSILON) {
             sheetItems.push({
                 ...stock,
                 type: 'materials',
-                x: profileSideOffset,
+                x: 0,
                 y: yCursor,
-                width: profileInnerWidth,
+                width: profileInnerWidth > EPSILON ? profileInnerWidth : outputProfileWidth,
                 height: leftoverHeight,
             });
         }
@@ -219,7 +265,7 @@ const packLinearProfiles = ({ stock, parts, sheetTrim, kerf }) => {
         const percentage = maxLength > 0 ? ((usedLength / maxLength) * 100).toFixed(1) : '0.0';
         results.push({
             ...stock,
-            width: profileWidth,
+            width: outputProfileWidth,
             height: stock.height,
             partsCount: usedParts.length,
             percentage,
@@ -272,18 +318,54 @@ const splitMainAndSideLeftovers = (leftovers) => {
     return { mainRemainder, sideLeftovers };
 };
 
-const runDirectionalPacking = ({ axis, sheetPiece, placeableParts, kerf, allowRotation }) => {
+const createStats = ({
+    inputParts = 0,
+    placedParts = 0,
+    usedAreaTotal = 0,
+    capacityTotal = 0,
+    sheetIterations = 0,
+    maxSheetIterations = 0,
+    directionalPasses = 0,
+    maxRecursionDepthReached = false,
+    maxRecursionDepthObserved = 0,
+    directionalGuardLimitReached = false,
+}) => ({
+    inputParts,
+    placedParts,
+    usedAreaTotal,
+    efficiency: capacityTotal > 0 ? Number(((usedAreaTotal / capacityTotal) * 100).toFixed(1)) : 0,
+    sheetIterations,
+    maxSheetIterations,
+    directionalPasses,
+    maxRecursionDepthReached,
+    maxRecursionDepthObserved,
+    directionalGuardLimitReached,
+});
+
+/**
+ * Executes one directional sheet fill (`vertical` or `horizontal`) until no progress.
+ * Returns placements, leftovers, remaining parts and diagnostics.
+ */
+const runDirectionalPacking = ({ axis, sheetPiece, placeableParts, kerf, allowRotation, maxRecursionDepth }) => {
     let remainingParts = [...placeableParts];
+    let targetCandidates = getSortedTargetCandidates(remainingParts);
     let currentPiece = { ...sheetPiece, id: `${sheetPiece.id}_${axis}` };
     const placements = [];
     const leftovers = [];
+    let passesCount = 0;
+    let maxRecursionDepthReached = false;
+    let maxRecursionDepthObserved = 0;
     let guard = 0;
+    const maxDirectionalIterations = Math.max(placeableParts.length * 2, DIRECTIONAL_GUARD_MIN);
+    let guardLimitReached = false;
 
     while (remainingParts.length > 0 && currentPiece && currentPiece.width > 0 && currentPiece.height > 0) {
         guard += 1;
-        if (guard > placeableParts.length * 2 + 20) break;
+        if (guard > maxDirectionalIterations) {
+            guardLimitReached = true;
+            break;
+        }
 
-        const targetCandidates = getSortedTargetCandidates(remainingParts);
         const targetPart = pickTargetForPiece(currentPiece, targetCandidates, allowRotation);
         if (!targetPart) {
             leftovers.push(currentPiece);
@@ -297,6 +379,7 @@ const runDirectionalPacking = ({ axis, sheetPiece, placeableParts, kerf, allowRo
             cuttingTool: kerf,
             axis,
             allowRotation,
+            maxRecursionDepth,
         });
 
         if (!passResult.success) {
@@ -304,8 +387,15 @@ const runDirectionalPacking = ({ axis, sheetPiece, placeableParts, kerf, allowRo
             break;
         }
 
+        passesCount += 1;
+        maxRecursionDepthReached = maxRecursionDepthReached || passResult.maxRecursionDepthReached;
+        if (passResult.maxRecursionDepthObserved > maxRecursionDepthObserved) {
+            maxRecursionDepthObserved = passResult.maxRecursionDepthObserved;
+        }
         placements.push(...passResult.placements);
         remainingParts = passResult.remainingParts;
+        const remainingSet = new Set(remainingParts);
+        targetCandidates = targetCandidates.filter((candidate) => remainingSet.has(candidate));
 
         const { mainRemainder, sideLeftovers } = splitMainAndSideLeftovers(passResult.leftovers);
         if (sideLeftovers.length > 0) leftovers.push(...sideLeftovers);
@@ -320,21 +410,25 @@ const runDirectionalPacking = ({ axis, sheetPiece, placeableParts, kerf, allowRo
         placements,
         leftovers,
         remainingParts,
+        passesCount,
+        maxRecursionDepthReached,
+        maxRecursionDepthObserved,
+        guardLimitReached,
     };
 };
 
-export const packSheets = async (stockInput, parts, settings) => {
+export const packSheets = (stockInput, parts, settings) => {
     const settingsValidation = validateSettings(settings);
-    if (!settingsValidation.ok) return buildInputError(settingsValidation.error, settings);
+    if (!settingsValidation.ok) return buildInputError(settingsValidation.error);
 
     const stockValidation = validateStock(stockInput);
-    if (!stockValidation.ok) return buildInputError(stockValidation.error, stockInput);
+    if (!stockValidation.ok) return buildInputError(stockValidation.error);
 
     const partsNormalization = normalizeAndExpandParts(parts);
-    if (!partsNormalization.ok) return buildInputError(partsNormalization.error, parts);
+    if (!partsNormalization.ok) return buildInputError(partsNormalization.error);
 
     const preparedParts = partsNormalization.parts;
-    if (preparedParts.length === 0) return { results: [], tooBigParts: [] };
+    if (preparedParts.length === 0) return createEmptyResult();
 
     const stock = {
         id: stockInput.id ?? null,
@@ -345,6 +439,9 @@ export const packSheets = async (stockInput, parts, settings) => {
     };
     const sheetTrim = settings.sheetTrim;
     const kerf = settings.kerf;
+    const minLeftoverSize = settings.minLeftoverSize ?? 0;
+    const maxRecursionDepth = settings.maxRecursionDepth ?? 64;
+    const inputPartsCount = preparedParts.length;
 
     if (stock.mode === '1d') {
         const oneDimensional = packLinearProfiles({
@@ -352,23 +449,32 @@ export const packSheets = async (stockInput, parts, settings) => {
             parts: preparedParts,
             sheetTrim,
             kerf,
+            minLeftoverSize,
         });
         return {
             results: oneDimensional.results,
             tooBigParts: oneDimensional.oversizedParts,
+            unplacedParts: [],
+            stopReason: null,
+            stats: createStats({
+                inputParts: inputPartsCount,
+                placedParts: oneDimensional.results.reduce((sum, map) => sum + map.partsCount, 0),
+                usedAreaTotal: oneDimensional.results.reduce((sum, map) => sum + map.usedArea, 0),
+                capacityTotal: oneDimensional.results.length * Math.max(0, stock.height - sheetTrim * 2),
+            }),
         };
     }
 
     const sheetWidth = stock.width - sheetTrim * 2;
     const sheetHeight = stock.height - sheetTrim * 2;
-    if (sheetWidth <= 0 || sheetHeight <= 0) {
-        return { results: [], tooBigParts: preparedParts };
+    if (sheetWidth <= EPSILON || sheetHeight <= EPSILON) {
+        return createEmptyResult({ tooBigParts: preparedParts });
     }
 
     const allowRotation = stock.allowRotation;
     const { oversizedParts, placeableParts } = splitPartsByFit(preparedParts, sheetWidth, sheetHeight, allowRotation);
     if (placeableParts.length === 0) {
-        return { results: [], tooBigParts: oversizedParts };
+        return createEmptyResult({ tooBigParts: oversizedParts });
     }
 
     const sheetPiece = {
@@ -382,13 +488,24 @@ export const packSheets = async (stockInput, parts, settings) => {
 
     const sheetArea = sheetWidth * sheetHeight;
     const results = [];
+    const unplacedParts = [];
     let remainingParts = [...placeableParts];
     let sheetIndex = 0;
     let guard = 0;
+    let stopReason = null;
+    const maxSheetIterations = Math.max(placeableParts.length * 2, 1000);
+    let directionalPasses = 0;
+    let maxRecursionDepthReached = false;
+    let maxRecursionDepthObserved = 0;
+    let directionalGuardLimitReached = false;
 
     while (remainingParts.length > 0) {
         guard += 1;
-        if (guard > placeableParts.length + 20) break;
+        if (guard > maxSheetIterations) {
+            unplacedParts.push(...remainingParts);
+            stopReason = 'max_sheet_iterations_reached';
+            break;
+        }
 
         const verticalResult = runDirectionalPacking({
             axis: CUT_AXIS.VERTICAL,
@@ -396,6 +513,7 @@ export const packSheets = async (stockInput, parts, settings) => {
             placeableParts: remainingParts,
             kerf,
             allowRotation,
+            maxRecursionDepth,
         });
         const horizontalResult = runDirectionalPacking({
             axis: CUT_AXIS.HORIZONTAL,
@@ -403,6 +521,7 @@ export const packSheets = async (stockInput, parts, settings) => {
             placeableParts: remainingParts,
             kerf,
             allowRotation,
+            maxRecursionDepth,
         });
 
         const verticalUsedArea = getUsedAreaFromPlacements(verticalResult.placements);
@@ -415,7 +534,8 @@ export const packSheets = async (stockInput, parts, settings) => {
         const bestResult = isVerticalBetter ? verticalResult : horizontalResult;
 
         if (!bestResult || bestResult.placements.length === 0 || bestResult.remainingParts.length >= remainingParts.length) {
-            oversizedParts.push(...remainingParts);
+            unplacedParts.push(...remainingParts);
+            stopReason = bestResult?.guardLimitReached ? 'directional_guard_limit_reached' : 'no_progress';
             break;
         }
 
@@ -429,6 +549,12 @@ export const packSheets = async (stockInput, parts, settings) => {
         });
         bestMap.runDirection = bestAxis;
         results.push(bestMap);
+        directionalPasses += bestResult.passesCount;
+        maxRecursionDepthReached = maxRecursionDepthReached || bestResult.maxRecursionDepthReached;
+        directionalGuardLimitReached = directionalGuardLimitReached || bestResult.guardLimitReached;
+        if (bestResult.maxRecursionDepthObserved > maxRecursionDepthObserved) {
+            maxRecursionDepthObserved = bestResult.maxRecursionDepthObserved;
+        }
 
         remainingParts = bestResult.remainingParts;
         sheetIndex += 1;
@@ -437,5 +563,19 @@ export const packSheets = async (stockInput, parts, settings) => {
     return {
         results,
         tooBigParts: oversizedParts,
+        unplacedParts,
+        stopReason,
+        stats: createStats({
+            inputParts: inputPartsCount,
+            placedParts: results.reduce((sum, map) => sum + map.partsCount, 0),
+            usedAreaTotal: results.reduce((sum, map) => sum + map.usedArea, 0),
+            capacityTotal: results.length * sheetArea,
+            sheetIterations: guard,
+            maxSheetIterations,
+            directionalPasses,
+            maxRecursionDepthReached,
+            maxRecursionDepthObserved,
+            directionalGuardLimitReached,
+        }),
     };
 };

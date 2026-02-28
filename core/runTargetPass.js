@@ -6,7 +6,8 @@ export const CUT_AXIS = {
     HORIZONTAL: 'horizontal',
 };
 
-const EPSILON = 1e-9;
+const EPSILON = 1e-6;
+const DP_SCALE = 10;
 
 const parseNumber = (value, fallback = 0) => {
     const n = Number(value);
@@ -14,6 +15,7 @@ const parseNumber = (value, fallback = 0) => {
 };
 
 const toNonNegativeNumber = (value, fallback = 0) => Math.max(0, parseNumber(value, fallback));
+const toDpUnits = (value) => Math.max(0, Math.floor((toNonNegativeNumber(value) + EPSILON) * DP_SCALE));
 
 const normalizeAxis = (axis) => {
     if (axis === CUT_AXIS.VERTICAL || axis === 'V') return CUT_AXIS.VERTICAL;
@@ -42,6 +44,22 @@ const createPartPlacement = (part, x, y) => ({
     type: 'parts',
     x,
     y,
+});
+
+const createPassResult = ({
+    success,
+    placements,
+    leftovers,
+    remainingParts,
+    maxRecursionDepthReached = false,
+    maxRecursionDepthObserved = 0,
+}) => ({
+    success,
+    placements,
+    leftovers,
+    remainingParts,
+    maxRecursionDepthReached,
+    maxRecursionDepthObserved,
 });
 
 const createRuntimeCache = () => ({
@@ -154,15 +172,6 @@ const removeTargetPartFromPool = (partsPool, targetPart) => {
         }
     }
 
-    if (removeIndex < 0 && targetPart?.id != null) {
-        for (let i = 0; i < partsPool.length; i += 1) {
-            if (partsPool[i]?.id === targetPart.id) {
-                removeIndex = i;
-                break;
-            }
-        }
-    }
-
     if (removeIndex < 0) return partsPool.slice();
     if (partsPool.length === 1) return [];
 
@@ -176,11 +185,15 @@ const removeTargetPartFromPool = (partsPool, targetPart) => {
     return result;
 };
 
+/**
+ * 0/1 knapsack on strip axis capacity.
+ * Objective: maximize packed area while respecting axis length + kerf budget.
+ */
 const pickBestSubsetByAxisCapacity = (entries, capacity, cuttingTool) => {
-    const cap = Math.max(0, Math.floor(capacity));
+    const cap = toDpUnits(capacity);
     if (cap <= 0 || !Array.isArray(entries) || entries.length === 0) return [];
 
-    const kerfInt = Math.max(0, Math.floor(cuttingTool));
+    const kerfInt = toDpUnits(cuttingTool);
     const dpArea = new Float64Array(cap + 1);
     const prevCap = new Int32Array(cap + 1);
     const pickedIdx = new Int32Array(cap + 1);
@@ -194,7 +207,7 @@ const pickBestSubsetByAxisCapacity = (entries, capacity, cuttingTool) => {
 
     for (let idx = 0; idx < entries.length; idx += 1) {
         const entry = entries[idx];
-        const size = Math.floor(entry.axisSize) + kerfInt;
+        const size = toDpUnits(entry.axisSize) + kerfInt;
         if (size <= 0 || size > cap) continue;
 
         for (let c = cap; c >= size; c -= 1) {
@@ -264,6 +277,10 @@ const pickLargestFittingTargetForPiece = (partsPool, piece, allowRotation, cache
     return bestPart;
 };
 
+/**
+ * Runs one target pass and optional recursive fill on generated leftovers.
+ * Returns placements, leftovers, remaining pool and recursion diagnostics.
+ */
 const runTargetPassInternal = ({
     piece,
     targetPart,
@@ -282,12 +299,14 @@ const runTargetPassInternal = ({
     const runtimeCache = cache || createRuntimeCache();
 
     if (!piece || !targetPart || piece.width <= 0 || piece.height <= 0) {
-        return {
+        return createPassResult({
             success: false,
             placements: [],
             leftovers: getSingleValidLeftover(piece),
             remainingParts: safePool,
-        };
+            maxRecursionDepthReached: false,
+            maxRecursionDepthObserved: recursionDepth,
+        });
     }
 
     const orientedTarget = chooseBestOrientationForBounds(
@@ -298,12 +317,14 @@ const runTargetPassInternal = ({
         runtimeCache
     );
     if (!orientedTarget) {
-        return {
+        return createPassResult({
             success: false,
             placements: [],
             leftovers: getSingleValidLeftover(piece),
             remainingParts: safePool,
-        };
+            maxRecursionDepthReached: false,
+            maxRecursionDepthObserved: recursionDepth,
+        });
     }
 
     const targetMetrics = getPartMetrics(orientedTarget, runtimeCache);
@@ -430,29 +451,36 @@ const runTargetPassInternal = ({
     if (mainRemainderPiece) immediateLeftovers.push(mainRemainderPiece);
     if (stripGeneratedLeftovers.length > 0) immediateLeftovers.push(...stripGeneratedLeftovers);
 
-    if (!enableRecursiveFill || recursionDepth >= maxRecursionDepth || remainingParts.length === 0 || immediateLeftovers.length === 0) {
-        return {
+    const maxDepthReached = recursionDepth >= maxRecursionDepth;
+    if (!enableRecursiveFill || maxDepthReached || remainingParts.length === 0 || immediateLeftovers.length === 0) {
+        return createPassResult({
             success: true,
             placements,
             leftovers: immediateLeftovers,
             remainingParts,
-        };
+            maxRecursionDepthReached: maxDepthReached,
+            maxRecursionDepthObserved: recursionDepth,
+        });
     }
 
     const recursiveSeedPieces = recursionDepth === 0 ? stripGeneratedLeftovers : immediateLeftovers;
     if (recursiveSeedPieces.length === 0) {
-        return {
+        return createPassResult({
             success: true,
             placements,
             leftovers: immediateLeftovers,
             remainingParts,
-        };
+            maxRecursionDepthReached: false,
+            maxRecursionDepthObserved: recursionDepth,
+        });
     }
 
     const recursivePieces = [...recursiveSeedPieces].sort((left, right) => getPieceArea(right) - getPieceArea(left));
     const recursivePlacements = [...placements];
     const recursiveLeftovers = recursionDepth === 0 && mainRemainderPiece ? [mainRemainderPiece] : [];
     let recursiveRemainingParts = remainingParts;
+    let recursionLimitHit = false;
+    let maxObservedDepth = recursionDepth;
 
     for (let i = 0; i < recursivePieces.length; i += 1) {
         const remainderPiece = recursivePieces[i];
@@ -495,14 +523,20 @@ const runTargetPassInternal = ({
         if (nestedResult.placements.length > 0) recursivePlacements.push(...nestedResult.placements);
         if (nestedResult.leftovers.length > 0) recursiveLeftovers.push(...nestedResult.leftovers);
         recursiveRemainingParts = nestedResult.remainingParts;
+        recursionLimitHit = recursionLimitHit || nestedResult.maxRecursionDepthReached;
+        if (nestedResult.maxRecursionDepthObserved > maxObservedDepth) {
+            maxObservedDepth = nestedResult.maxRecursionDepthObserved;
+        }
     }
 
-    return {
+    return createPassResult({
         success: true,
         placements: recursivePlacements,
         leftovers: recursiveLeftovers,
         remainingParts: recursiveRemainingParts,
-    };
+        maxRecursionDepthReached: recursionLimitHit,
+        maxRecursionDepthObserved: maxObservedDepth,
+    });
 };
 
 export const runTargetPass = ({
