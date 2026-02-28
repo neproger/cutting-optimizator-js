@@ -15,7 +15,7 @@ const parseNumber = (value, fallback = 0) => {
 };
 
 const toNonNegativeNumber = (value, fallback = 0) => Math.max(0, parseNumber(value, fallback));
-const toDpUnits = (value) => Math.max(0, Math.floor((toNonNegativeNumber(value) + EPSILON) * DP_SCALE));
+const toDpUnits = (value) => Math.max(0, Math.ceil((toNonNegativeNumber(value) - EPSILON) * DP_SCALE));
 
 const normalizeAxis = (axis) => {
     if (axis === CUT_AXIS.VERTICAL || axis === 'V') return CUT_AXIS.VERTICAL;

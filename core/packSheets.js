@@ -9,7 +9,7 @@ const EPSILON = 1e-6;
 const DP_SCALE = 10;
 const MAX_DIMENSION = 1e8;
 const DIRECTIONAL_GUARD_MIN = 200;
-const toDpUnits = (value) => Math.max(0, Math.floor((value + EPSILON) * DP_SCALE));
+const toDpUnits = (value) => Math.max(0, Math.ceil((value - EPSILON) * DP_SCALE));
 
 const createEmptyResult = (overrides = {}) => ({
     results: [],
