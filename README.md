@@ -18,6 +18,8 @@ Main goal:
 
 The module uses only canonical fields.
 
+<img width="971" height="749" alt="Screenshot_1" src="https://github.com/user-attachments/assets/765809d1-c8e7-4ee8-b984-67029e1ce69a" />
+
 ## Public API
 
 - `packSheets(stock, parts, settings)`
