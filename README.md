@@ -1,8 +1,8 @@
-# Packer Module
+# cutting-optimizator-js
 
 ## Overview
 
-`packer` is a standalone cutting engine module.
+`cutting-optimizator-js` is a standalone cutting engine module.
 
 It provides:
 
@@ -133,7 +133,7 @@ Optional fields:
   "tooBigParts": [],
   "unplacedParts": [],
   "stopReason": "validation_error",
-  "error": "[packer] ...validation message..."
+  "error": "[cutting-optimizator-js] ...validation message..."
 }
 ```
 

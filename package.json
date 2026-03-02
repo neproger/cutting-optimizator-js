@@ -1,18 +1,20 @@
 {
-  "name": "js-packer",
+  "name": "cutting-optimizator-js",
   "version": "1.0.0",
-  "description": "A simple tool for packing JavaScript files.",
+  "description": "Standalone cutting optimization engine for 1D and 2D packing.",
   "main": "index.js",
   "scripts": {
     "test": "echo 'Error: no test specified' && exit 1"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/neproger/js-packer.git"
+    "url": "git+https://github.com/neproger/cutting-optimizator-js.git"
   },
   "keywords": [
     "javascript",
-    "packer"
+    "cutting",
+    "packing",
+    "optimizer"
   ],
   "author": "neproger",
   "license": "ISC"
